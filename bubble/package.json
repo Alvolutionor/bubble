@@ -1,0 +1,14 @@
+{
+  "name": "bubble",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Desktop floating-ball notifier for finished AI/agent tasks",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "tauri": "tauri"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}

@@ -1,0 +1,14 @@
+# Rust / Tauri build output
+bubble/src-tauri/target/
+bubble/src-tauri/gen/schemas/
+
+# Node
+bubble/node_modules/
+*.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+
+# Runtime data lives in ~/.claude/bubble/, never in the repo

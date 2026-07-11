@@ -1,0 +1,169 @@
+* { box-sizing: border-box; }
+html, body {
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  overflow: hidden;
+  font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  -webkit-user-select: none;
+  user-select: none;
+  cursor: default;
+}
+
+/* ---- ball: same size & top-right margin in BOTH states -> never moves on screen ---- */
+#ball {
+  position: absolute;
+  top: 9px;
+  right: 9px;
+  width: 54px;
+  height: 54px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  z-index: 3;
+  cursor: pointer;
+  background: radial-gradient(circle at 32% 28%, #7c9dff 0%, #5560f0 45%, #3b2fd6 100%);
+  box-shadow: 0 5px 16px rgba(60, 60, 180, 0.45), inset 0 1px 2px rgba(255, 255, 255, 0.4);
+  transition: transform 0.12s ease, filter 0.2s ease;
+}
+#ball svg, #badge { pointer-events: none; }
+#ball:hover { transform: scale(1.06); }
+#ball.empty { filter: grayscale(0.6) brightness(0.85); box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35); }
+
+#badge {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  min-width: 19px;
+  height: 19px;
+  padding: 0 5px;
+  border-radius: 10px;
+  background: #ff3b30;
+  color: #fff;
+  font-size: 11.5px;
+  font-weight: 700;
+  line-height: 19px;
+  text-align: center;
+  border: 1.5px solid rgba(255, 255, 255, 0.9);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+}
+#ball.empty #badge { display: none; }
+
+@keyframes pop {
+  0% { transform: scale(1); }
+  40% { transform: scale(1.18); }
+  100% { transform: scale(1); }
+}
+#ball.pulse { animation: pop 0.45s ease; }
+
+/* ---- panel: floats out down-left from the ball ---- */
+#panel { display: none; }
+body.expanded #panel {
+  display: flex;
+  flex-direction: column;
+  position: absolute;
+  inset: 0;
+  padding: 9px;
+  background: rgba(24, 25, 30, 0.98);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 14px;
+  color: #e8e8ec;
+  animation: panelIn 0.12s ease;
+  transform-origin: top right;
+}
+@keyframes panelIn {
+  from { opacity: 0; transform: scale(0.96); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+#panel-head {
+  height: 30px;
+  display: flex;
+  align-items: center;
+  font-size: 13px;
+  font-weight: 600;
+  color: #fff;
+}
+/* ball overlaps the panel corner it lives in; keep controls clear of it */
+body.expanded:not(.open-up) #panel-head { padding-right: 58px; }
+body.expanded.open-up #panel-foot { padding-right: 58px; }
+body.expanded.open-up #ball { top: auto; bottom: 9px; }
+body.expanded.open-up #panel { transform-origin: bottom right; }
+
+#list {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  flex: 1;
+  overflow-y: auto;
+}
+#list::-webkit-scrollbar { width: 5px; }
+#list::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.18); border-radius: 3px; }
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 8px;
+  margin-bottom: 4px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.05);
+  cursor: pointer;
+  transition: background 0.1s ease;
+}
+.row:hover { background: rgba(124, 157, 255, 0.22); }
+.info { flex: 1; min-width: 0; }
+.proj {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #fff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.meta { font-size: 11px; color: #9a9aa6; margin-top: 1px; }
+.x {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: #9a9aa6;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+.x:hover { background: rgba(255, 59, 48, 0.25); color: #fff; }
+
+#empty { display: none; }
+body.expanded.no-tasks #list { display: none; }
+body.expanded.no-tasks #empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  color: #7a7a86;
+  font-size: 12.5px;
+}
+
+#panel-foot {
+  display: flex;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+#panel-foot button {
+  flex: 1;
+  padding: 6px 0;
+  border: none;
+  border-radius: 7px;
+  font-size: 12px;
+  color: #cfcfd6;
+  background: rgba(255, 255, 255, 0.06);
+  cursor: pointer;
+}
+#panel-foot button:hover { background: rgba(255, 255, 255, 0.13); color: #fff; }
+#quit:hover { background: rgba(255, 59, 48, 0.3); }
