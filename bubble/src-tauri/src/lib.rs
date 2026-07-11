@@ -78,6 +78,10 @@ fn save_pos(x: i32, y: i32) {
 fn apply_visibility(window: &tauri::WebviewWindow, count: usize, ball_pos: Option<(i32, i32)>) {
     if count > 0 {
         let _ = window.show();
+        // macOS re-centers a hidden window on show, so re-apply the position after.
+        if let Some((x, y)) = ball_pos {
+            let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+        }
     } else {
         // Reset to the collapsed ball before hiding, so the next appearance is
         // always a clean collapsed ball (never a stranded expanded panel).

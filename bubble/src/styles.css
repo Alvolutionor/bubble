@@ -166,4 +166,5 @@ body.expanded.no-tasks #empty {
   cursor: pointer;
 }
 #panel-foot button:hover { background: rgba(255, 255, 255, 0.13); color: #fff; }
+#panel-foot button.mini { flex: 0 0 auto; width: 36px; font-weight: 600; }
 #quit:hover { background: rgba(255, 59, 48, 0.3); }

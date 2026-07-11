@@ -8,7 +8,7 @@ the ball to see how many are waiting, click to see them grouped by project, and 
 one to **switch to that project's VS Code window** — then it's crossed off. When
 nothing is waiting, the ball hides itself completely.
 
-![bubble floating ball](assets/demo-ball.png)
+<p align="center"><img src="assets/demo.png" alt="bubble floating over the editor with a waiting task" width="380"></p>
 
 ---
 
@@ -82,8 +82,19 @@ LaunchAgent; Linux: your desktop's autostart).
 
 ## Wiring it to your AI tool
 
-bubble is driven by a hook that runs a command when a session finishes. For
-**Claude Code**, add this to `~/.claude/settings.json`:
+bubble is driven by a hook that runs a command when a session finishes.
+
+> **Easiest way — just ask your AI to wire it up.** Since you're already using an AI
+> coding agent, hand it this task. In Claude Code, say:
+>
+> > *Add a `Stop` hook to my `~/.claude/settings.json` that runs
+> > `node "<absolute-path-to>/hook/bubble-hook.js"`, keeping any existing hooks. Then
+> > start `bubble` (the built binary).*
+>
+> It'll edit the settings, verify the JSON, and can launch the app for you. The manual
+> steps below are the fallback if you'd rather do it by hand.
+
+For **Claude Code**, the hook to add to `~/.claude/settings.json` is:
 
 ```json
 {

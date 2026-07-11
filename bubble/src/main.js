@@ -6,8 +6,7 @@ const appWindow = getCurrentWindow();
 let tasks = [];
 let expanded = false;
 
-const LANG = (navigator.language || "en").toLowerCase().startsWith("zh") ? "zh" : "en";
-const T = {
+const STRINGS = {
   zh: {
     tip: "AI 任务 · 点开看待处理",
     allDone: "全部处理完了",
@@ -36,7 +35,30 @@ const T = {
     hour: (n) => `${n}h ago`,
     day: (n) => `${n}d ago`,
   },
-}[LANG];
+};
+
+let lang = localStorage.getItem("bubble-lang");
+if (lang !== "zh" && lang !== "en") {
+  lang = (navigator.language || "en").toLowerCase().startsWith("zh") ? "zh" : "en";
+}
+let T = STRINGS[lang];
+
+function applyStrings() {
+  T = STRINGS[lang];
+  document.getElementById("clear").textContent = T.clear;
+  document.getElementById("quit").textContent = T.quit;
+  document.getElementById("empty").textContent = T.empty;
+  document.getElementById("ball").title = T.tip;
+  const lt = document.getElementById("lang");
+  if (lt) lt.textContent = lang === "zh" ? "EN" : "中";
+  render();
+}
+
+function setLang(l) {
+  lang = l;
+  localStorage.setItem("bubble-lang", lang);
+  applyStrings();
+}
 
 function relTime(ts) {
   const s = Math.floor((Date.now() - ts) / 1000);
@@ -157,11 +179,8 @@ function wireBall() {
 }
 
 window.addEventListener("DOMContentLoaded", () => {
-  document.getElementById("clear").textContent = T.clear;
-  document.getElementById("quit").textContent = T.quit;
-  document.getElementById("empty").textContent = T.empty;
-  document.getElementById("panel-title").textContent = T.allDone;
-  document.getElementById("ball").title = T.tip;
+  applyStrings();
+  document.getElementById("lang").addEventListener("click", () => setLang(lang === "zh" ? "en" : "zh"));
   wireBall();
   document.getElementById("clear").addEventListener("click", clearAll);
   document.getElementById("quit").addEventListener("click", () => invoke("quit_app"));
