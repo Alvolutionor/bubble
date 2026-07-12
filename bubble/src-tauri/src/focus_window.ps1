@@ -21,8 +21,10 @@ public class W {
 }
 "@
 
-$script:found = [IntPtr]::Zero
-$suffix = "$Project - Visual Studio Code"
+# VS Code titles the window after the OPEN workspace folder, which may be an
+# ancestor of the AI's cwd (parent opened, work done in a subfolder). So collect
+# titles first, then match the nearest ancestor folder that has an open window.
+$script:titles = @{}
 $cb = [W+EnumProc]{
   param($h, $l)
   if (-not [W]::IsWindowVisible($h)) { return $true }
@@ -31,10 +33,25 @@ $cb = [W+EnumProc]{
   $sb = New-Object System.Text.StringBuilder ($len + 1)
   [void][W]::GetWindowText($h, $sb, $sb.Capacity)
   $t = $sb.ToString()
-  if ($t.EndsWith($suffix)) { $script:found = $h; return $false }
+  if ($t.EndsWith(' - Visual Studio Code')) { $script:titles[$h] = $t }
   return $true
 }
 [void][W]::EnumWindows($cb, [IntPtr]::Zero)
+
+$script:found = [IntPtr]::Zero
+$dir = $Cwd
+while ($dir -and $script:found -eq [IntPtr]::Zero) {
+  $name = Split-Path $dir -Leaf
+  if ($name) {
+    $suffix = "$name - Visual Studio Code"
+    foreach ($h in $script:titles.Keys) {
+      if ($script:titles[$h].EndsWith($suffix)) { $script:found = $h; break }
+    }
+  }
+  $parent = Split-Path $dir -Parent
+  if ($parent -eq $dir) { break }
+  $dir = $parent
+}
 
 if ($script:found -ne [IntPtr]::Zero) {
   $h = $script:found
