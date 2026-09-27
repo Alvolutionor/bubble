@@ -1,4 +1,4 @@
-param([string]$Project, [string]$Cwd)
+param([string]$Project, [string]$Cwd, [string]$Link)
 
 Add-Type @"
 using System;
@@ -67,6 +67,10 @@ if ($script:found -ne [IntPtr]::Zero) {
   [void][W]::SetForegroundWindow($h)
   [void][W]::AttachThreadInput($cur, $t1, $false)
   [void][W]::AttachThreadInput($cur, $t2, $false)
+  if ($Link) {
+    Start-Sleep -Milliseconds 300
+    Start-Process $Link
+  }
   Write-Output "focused"
 } else {
   Start-Process code -ArgumentList @('-n', $Cwd)

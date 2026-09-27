@@ -12,3 +12,6 @@ Thumbs.db
 *.swp
 
 # Runtime data lives in ~/.claude/bubble/, never in the repo
+
+# Packaged companion extension (rebuilt by npm run install-local)
+bubble/vscode-ext/*.vsix

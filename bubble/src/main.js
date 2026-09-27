@@ -5,31 +5,38 @@ const appWindow = getCurrentWindow();
 
 let tasks = [];
 let expanded = false;
+let dragInFlight = false;
 
 const STRINGS = {
   zh: {
-    tip: "AI 任务 · 点开看待处理",
+    tip: "AI 会话 · 点开查看和切换",
     allDone: "全部处理完了",
-    waiting: (n) => `${n} 个在等你`,
-    empty: "🎉 没有等你的任务",
+    summary: (w, r) => `${w} 个等你 · ${r} 个最近`,
+    waiting: "等你",
+    recent: "最近 24 小时 · 窗口已打开",
+    running: "运行中",
+    runningN: (n) => `${n} 个运行中`,
+    empty: "🎉 没有等你或最近的会话",
     clear: "清空",
     quit: "退出",
     dismiss: "划掉",
-    times: (n) => `  ·  ${n} 次`,
     just: "刚刚",
     min: (n) => `${n} 分钟前`,
     hour: (n) => `${n} 小时前`,
     day: (n) => `${n} 天前`,
   },
   en: {
-    tip: "AI tasks · click to view",
+    tip: "AI sessions · click to view and switch",
     allDone: "All caught up",
-    waiting: (n) => `${n} waiting`,
-    empty: "🎉 Nothing waiting",
+    summary: (w, r) => `${w} waiting · ${r} recent`,
+    waiting: "Waiting for you",
+    recent: "Last 24h · window open",
+    running: "running",
+    runningN: (n) => `${n} running`,
+    empty: "🎉 Nothing waiting or recent",
     clear: "Clear",
     quit: "Quit",
     dismiss: "Dismiss",
-    times: (n) => `  ·  ×${n}`,
     just: "just now",
     min: (n) => `${n}m ago`,
     hour: (n) => `${n}h ago`,
@@ -70,38 +77,70 @@ function relTime(ts) {
   return T.day(Math.floor(h / 24));
 }
 
+function byProject(rows) {
+  const groups = new Map();
+  for (const t of rows) {
+    const g = groups.get(t.project) || { ids: [], sessions: [] };
+    g.ids.push(t.id);
+    g.sessions.push(t);
+    groups.set(t.project, g);
+  }
+  return [...groups.values()].map(({ ids, sessions }) => {
+    const live = sessions.filter((t) => t.state === "running");
+    return { ...(live[0] || sessions[0]), ids, liveCount: live.length };
+  });
+}
+
+function renderRow(t) {
+  const li = document.createElement("li");
+  const running = t.state === "running";
+  li.className = running ? "row running" : "row";
+  li.innerHTML =
+    '<div class="info"><div class="proj"></div><div class="note"></div>' +
+    '<div class="meta"></div></div><button class="x"></button>';
+  li.querySelector(".proj").textContent = t.project;
+  const note = li.querySelector(".note");
+  const text = (t.state === "waiting" && t.note) || t.prompt || "";
+  note.textContent = text;
+  note.style.display = text ? "" : "none";
+  const x = li.querySelector(".x");
+  x.textContent = "×";
+  x.title = T.dismiss;
+  x.style.visibility = running ? "hidden" : "";
+  li.querySelector(".meta").textContent =
+    t.liveCount > 1 ? T.runningN(t.liveCount) : running ? T.running : relTime(t.last_ts);
+  li.addEventListener("click", (e) => {
+    if (e.target.closest(".x")) return;
+    openTask(t.id);
+  });
+  x.addEventListener("click", (e) => {
+    e.stopPropagation();
+    dismiss(t.ids || [t.id]);
+  });
+  return li;
+}
+
 function render() {
-  const n = tasks.length;
-  const badge = document.getElementById("badge");
-  badge.textContent = n > 99 ? "99+" : String(n);
-  document.getElementById("ball").classList.toggle("empty", n === 0);
-  document.body.classList.toggle("no-tasks", n === 0);
+  const waiting = tasks.filter((t) => t.state === "waiting");
+  const recent = byProject(tasks.filter((t) => t.state !== "waiting"));
+  const w = waiting.length;
+  document.getElementById("badge").textContent = w > 99 ? "99+" : String(w);
+  const ball = document.getElementById("ball");
+  ball.classList.toggle("empty", w === 0);
+  ball.classList.toggle("busy", tasks.some((t) => t.state === "running"));
+  document.body.classList.toggle("no-tasks", tasks.length === 0);
   document.getElementById("panel-title").textContent =
-    n === 0 ? T.allDone : T.waiting(n);
+    tasks.length === 0 ? T.allDone : T.summary(w, recent.length);
 
   const list = document.getElementById("list");
   list.innerHTML = "";
-  for (const t of tasks) {
-    const li = document.createElement("li");
-    li.className = "row";
-    li.innerHTML =
-      '<div class="info"><div class="proj"></div><div class="meta"></div></div>' +
-      '<button class="x"></button>';
-    li.querySelector(".proj").textContent = t.project;
-    const x = li.querySelector(".x");
-    x.textContent = "×";
-    x.title = T.dismiss;
-    li.querySelector(".meta").textContent =
-      relTime(t.last_ts) + (t.count > 1 ? T.times(t.count) : "");
-    li.addEventListener("click", (e) => {
-      if (e.target.closest(".x")) return;
-      openTask(t.id);
-    });
-    li.querySelector(".x").addEventListener("click", (e) => {
-      e.stopPropagation();
-      dismiss(t.id);
-    });
-    list.appendChild(li);
+  for (const [label, rows] of [[T.waiting, waiting], [T.recent, recent]]) {
+    if (!rows.length) continue;
+    const head = document.createElement("li");
+    head.className = "section";
+    head.textContent = `${label} · ${rows.length}`;
+    list.appendChild(head);
+    for (const t of rows) list.appendChild(renderRow(t));
   }
 }
 
@@ -114,8 +153,8 @@ async function openTask(id) {
   render();
   collapse();
 }
-async function dismiss(id) {
-  tasks = await invoke("dismiss_task", { id });
+async function dismiss(ids) {
+  for (const id of ids) tasks = await invoke("dismiss_task", { id });
   render();
 }
 async function clearAll() {
@@ -126,10 +165,18 @@ async function clearAll() {
 async function expand() {
   if (expanded) return;
   expanded = true;
-  const openUp = await invoke("expand_window");
+  // Resolve direction and fill the list BEFORE the window changes size, so the
+  // panel's first paint and the resize land together. Doing it the other way
+  // round painted the relocated ball one frame ahead of the panel, which read
+  // as the ball being shoved sideways.
+  const openUp = await invoke("peek_open_up");
+  tasks = await invoke("list_tasks");
   document.body.classList.toggle("open-up", !!openUp);
   document.body.classList.add("expanded");
-  refresh();
+  render();
+  await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+  if (!expanded) return;
+  await invoke("expand_window");
 }
 async function collapse() {
   if (!expanded) return;
@@ -165,6 +212,8 @@ function wireBall() {
     const move = (ev) => {
       if (!dragging && (Math.abs(ev.screenX - sx) > 4 || Math.abs(ev.screenY - sy) > 4)) {
         dragging = true;
+        dragInFlight = true;
+        setTimeout(() => { dragInFlight = false; }, 3000);
         cleanup();
         appWindow.startDragging();
       }
@@ -188,12 +237,19 @@ window.addEventListener("DOMContentLoaded", () => {
     if (e.key === "Escape") collapse();
   });
   appWindow.onFocusChanged(({ payload: focused }) => {
-    if (!focused) collapse();
+    // ponytail: startDragging drops focus for the duration of the OS drag loop;
+    // collapsing there would fight the drag and desync size from state.
+    if (focused) {
+      dragInFlight = false;
+      return;
+    }
+    if (dragInFlight) return;
+    collapse();
   });
   refresh();
-  listen("tasks-updated", () => {
+  listen("tasks-updated", ({ payload: notify }) => {
     refresh();
-    pulse();
+    if (notify !== false) pulse();
   });
   listen("collapsed", () => {
     expanded = false;

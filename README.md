@@ -1,12 +1,14 @@
 # bubble 🫧
 
-A tiny always-on-top desktop **floating ball** that collects your finished AI/agent
-tasks and lets you jump straight back to the right editor window.
+A tiny always-on-top desktop **floating ball** that tracks your AI coding sessions
+(Claude Code and Codex) and lets you jump straight back to the right editor window.
 
-When an AI coding session finishes a turn, a task is pushed onto the ball. Glance at
-the ball to see how many are waiting, click to see them grouped by project, and click
-one to **switch to that project's VS Code window** — then it's crossed off. When
-nothing is waiting, the ball hides itself completely.
+The panel shows sessions **waiting for you** on top (a finished turn with no background
+agents still working, or a permission prompt), and below them one row per project whose
+VS Code window is open and that saw activity in the **last 24 hours**, with running ones
+marked. Click any row to **switch to that project's
+VS Code window**. The red badge counts only the waiting sessions, and a waiting row
+clears itself once you answer it in the editor, even if you never touched the ball.
 
 <p align="center"><img src="assets/demo.png" alt="bubble floating over the editor with a waiting task" width="380"></p>
 
@@ -21,35 +23,37 @@ badge is your count, and one click takes you to the window that's waiting.
 ## How it works
 
 ```
-  AI session finishes a turn
-            │  (a hook runs a command)
+  prompt sent / turn finished / permission asked / session closed
+            │  (Claude hooks run a command)
             ▼
-  hook/bubble-hook.js  ──writes one JSON file──▶  ~/.claude/bubble/inbox/
-            │                                              │
-       (also beeps, if you keep the beep)          ball polls every 1.5s
-                                                           ▼
-                                          the ball appears, badge +1
-                                          click → panel grouped by project
-                                          click a project → focus its editor window
-                                          task removed; 0 tasks → ball hides
+  hook/bubble-hook.js  ──writes one JSON file──▶  ~/.claude/bubble/inbox/  ─┐
+                                                                             │
+  ~/.claude/projects/*/*.jsonl  (Claude transcripts)  ─────────────────────┤ ball polls
+  ~/.codex/sessions/**/rollout-*.jsonl  (Codex rollouts)  ─────────────────┤ every 1.5s
+                                                                             ▼
+                                            one row per session: running / waiting
+                                            badge = waiting count, pulse on new wait
+                                            click a row → focus its editor window
+                                            waiting rows clear once answered anywhere
 ```
 
 Three decoupled pieces, each with one job:
 
-- **Collector** — `hook/bubble-hook.js`, a small Node script run by your tool's
-  "task finished" hook. It writes one JSON file per event into
+- **Collector** — `hook/bubble-hook.js`, a small Node script run by Claude Code's
+  hooks, plus the ball's own read-only scan of Claude and Codex transcripts. It writes one JSON file per event into
   `~/.claude/bubble/inbox/` (one file per event = zero write contention, survives the
   ball being closed).
 - **Store** — `~/.claude/bubble/`: an `inbox/` the ball drains, plus a `state.json`
   the ball owns and a `pos.json` remembering where you dragged the ball.
 - **Ball** — a [Tauri](https://tauri.app) app (Rust + a system WebView, ~30&nbsp;MB
-  RAM). Polls the inbox, shows/hides itself, and switches editor windows.
+  RAM). Polls the inbox and transcripts, and switches editor windows.
 
 ## Features
 
-- **Appears only when needed** — hidden at 0 tasks, pops up (with a pulse) on a new one.
-- **Grouped by project** — repeated finishes in the same folder collapse to one row with a count.
-- **One-click window switching** — jumps to the editor window for that project.
+- **Waiting and last-hour sessions, per session** — two sessions in the same folder are two rows. A turn that ends while background agents keep working is not reported as waiting.
+- **Auto-clear** — send a new prompt or answer a permission prompt in the editor and the waiting row goes away.
+- **Always visible** — coloured while anything runs or waits, grey when idle; pulses when a session starts waiting.
+- **One-click window switching** — jumps to the editor window for that session's project.
 - **Draggable & remembered** — drag it anywhere; position persists across launches.
 - **Opens toward the screen center** — panel expands up or down so it never falls off an edge; the ball itself never moves.
 - **Light** — system WebView, no bundled Chromium.
@@ -94,21 +98,58 @@ bubble is driven by a hook that runs a command when a session finishes.
 > It'll edit the settings, verify the JSON, and can launch the app for you. The manual
 > steps below are the fallback if you'd rather do it by hand.
 
-For **Claude Code**, the hook to add to `~/.claude/settings.json` is:
+For **Claude Code**, add the same command to four events in `~/.claude/settings.json`:
 
 ```json
 {
   "hooks": {
-    "Stop": [
-      {
-        "hooks": [
-          { "type": "command", "command": "node \"/ABSOLUTE/PATH/TO/hook/bubble-hook.js\"" }
-        ]
-      }
-    ]
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "node \"/ABSOLUTE/PATH/TO/hook/bubble-hook.js\"" }] }],
+    "Stop":             [{ "hooks": [{ "type": "command", "command": "node \"/ABSOLUTE/PATH/TO/hook/bubble-hook.js\"" }] }],
+    "Notification":     [{ "hooks": [{ "type": "command", "command": "node \"/ABSOLUTE/PATH/TO/hook/bubble-hook.js\"" }] }],
+    "SessionEnd":       [{ "hooks": [{ "type": "command", "command": "node \"/ABSOLUTE/PATH/TO/hook/bubble-hook.js\"" }] }]
   }
 }
 ```
+
+Claude Code reads hooks when a session starts, so restart open sessions after editing.
+Sessions that started earlier still show up: the ball also reads
+`~/.claude/projects/*/*.jsonl` directly.
+
+For **Codex**, no hook is needed for running/finished state: the ball reads
+`~/.codex/sessions/**/rollout-*.jsonl`. Optionally point Codex's `notify` at
+`hook/codex-bubble-notify.js` as a second finish signal. Its events carry `"agent":"codex"` and only count for sessions already tracked from a rollout: the Codex extension also runs rollout-less helper threads (e.g. title generation) whose turns fire `notify` too.
+
+### VS Code companion extension
+
+`bubble/vscode-ext/` is a tiny extension that makes clicks and "seen" per session
+instead of per window. It is built for sessions kept in the **sidebar**:
+
+- **Click a row** → the ball focuses the project window, then opens the session there:
+  Claude via `~/.claude/bubble/open.json` (the window whose workspace contains the
+  session's folder claims it and runs `claude-vscode.editor.open`, honoring
+  `claudeCode.preferredLocation`: sidebar or tab; no URI, so no "allow extension to open
+  this URI?" prompt), Codex via Codex's own `vscode://openai.chatgpt/local/<id>`
+  (switches its sidebar).
+  Set `"claudeCode.preferredLocation": "sidebar"` so Claude sessions open there too.
+- **Stay 15 seconds** in a focused window whose sidebar shows the waiting session → its
+  row clears, even if you never answer it. Which session is shown comes from:
+  - Claude: that window's own `Claude VSCode.log` (found via the extension's `logUri`),
+    where the webview logs `update_session_state` for the session it hosts and
+    `isFarewell` when it switches away.
+  - Codex: Codex's local IPC pipe `\\.\pipe\codex-ipc`; a view showing a conversation
+    broadcasts `thread-stream-following-changed`. The extension listens only (it declines
+    every request) and the ball matches the conversation's project to the window.
+
+  The extension sends a `seen` heartbeat per shown session every 5s while the window is
+  focused; the ball does the 15s check.
+
+Install (needs Node and the `code` CLI; repeat after editing the extension):
+
+```bash
+cd bubble/vscode-ext && npm run install-local
+```
+
+VS Code asks once to allow the extension to open bubble's links.
 
 Keep (or add) your finish sound as a second command in the same array — the beep is
 independent of bubble:
@@ -132,15 +173,17 @@ The hook is just a JSON writer. Any tool can feed the ball by dropping a file in
 
 - **Drag** the ball to move it (position is remembered).
 - **Single click** the ball → open the panel; click again / `Esc` / click elsewhere → close.
-- **Click a project row** → switch to its editor window and remove it.
-- **×** on a row dismisses it; the panel footer has **Clear all** and **Quit**.
+- **Click a row** → switch to its editor window and, with the companion extension, to that session's tab. A waiting row moves back to the recent list.
+- **×** hides a row until that session does something new; **Clear** moves all waiting rows back to the recent list; **Quit** exits.
 
 ## Architecture notes & deliberate trade-offs
 
-- Tasks are keyed by `cwd`, so parallel agents in the *same* folder collapse into one row.
-- Window switching matches by title (`<project> - Visual Studio Code`); two projects with the same folder name could match the wrong window.
+- Rows are keyed by session id; the state machine lives in `bubble/src-tauri/src/sessions.rs`. Transcripts fill the gaps hooks cannot report: an Esc interrupt, a permission prompt answered in the editor, background agents still writing under `<session>/subagents/`, a session that died (no transcript growth for 20 minutes).
+- Codex keeps its rollout file open on Windows, so its modified time never moves; activity is detected by file size instead.
+- Window switching matches by title (`<project> - Visual Studio Code`); two projects with the same folder name could match the wrong window. The same title match decides which sessions are tracked at all (Windows only; elsewhere every session is tracked).
 - The ball polls the inbox every 1.5s (no filesystem watcher).
-- The list shows project + time, not a summary of what the agent did.
+- "Seen" reads undocumented internals: the Claude extension's info-level log line `Received message from webview:` and Codex's IPC frames (4-byte little-endian length + JSON). An update of either extension can silently break it; clicks and answers keep working. "Shown" means mounted in the sidebar, so a collapsed sidebar, or the Codex container covering Claude's, still counts. Closing a Claude editor tab logs no farewell, so a closed tab's session keeps counting as shown until the window reloads.
+- The list shows project, the first line of the latest prompt (or the permission request), and time; no summary.
 - On Windows the collapsed window is 136px wide (OS minimum for a captioned window); the extra area is transparent and clicks pass through it.
 
 ## Contributing

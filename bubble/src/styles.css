@@ -13,7 +13,10 @@ html, body {
 /* ---- ball: same size & top-right margin in BOTH states -> never moves on screen ---- */
 #ball {
   position: absolute;
-  top: 9px;
+  /* ponytail: bottom-anchored. In the 72px collapsed window 72-9-54 == 9, so this
+     matches the old top:9 exactly, while in the 320px panel it is already correct
+     for open-up -- the ball can no longer be painted 248px high for a frame. */
+  bottom: 9px;
   right: 9px;
   width: 54px;
   height: 54px;
@@ -30,7 +33,7 @@ html, body {
 }
 #ball svg, #badge { pointer-events: none; }
 #ball:hover { transform: scale(1.06); }
-#ball.empty { filter: grayscale(0.6) brightness(0.85); box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35); }
+#ball.empty:not(.busy) { filter: grayscale(0.6) brightness(0.85); box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35); }
 
 #badge {
   position: absolute;
@@ -64,7 +67,12 @@ body.expanded #panel {
   display: flex;
   flex-direction: column;
   position: absolute;
-  inset: 0;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  /* the ball keeps its own column on the right; the panel stops before it so the
+     two never overlap */
+  right: 72px;
   padding: 9px;
   background: rgba(24, 25, 30, 0.98);
   border: 1px solid rgba(255, 255, 255, 0.09);
@@ -86,10 +94,7 @@ body.expanded #panel {
   font-weight: 600;
   color: #fff;
 }
-/* ball overlaps the panel corner it lives in; keep controls clear of it */
-body.expanded:not(.open-up) #panel-head { padding-right: 58px; }
-body.expanded.open-up #panel-foot { padding-right: 58px; }
-body.expanded.open-up #ball { top: auto; bottom: 9px; }
+body.expanded:not(.open-up) #ball { top: 9px; bottom: auto; }
 body.expanded.open-up #panel { transform-origin: bottom right; }
 
 #list {
@@ -114,11 +119,36 @@ body.expanded.open-up #panel { transform-origin: bottom right; }
   transition: background 0.1s ease;
 }
 .row:hover { background: rgba(124, 157, 255, 0.22); }
+.section {
+  margin: 8px 2px 5px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #9a9aa6;
+}
+.section:first-child { margin-top: 0; }
+.row.running .proj::before {
+  content: "";
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: #5ef0a0;
+  vertical-align: 1px;
+}
 .info { flex: 1; min-width: 0; }
 .proj {
   font-size: 12.5px;
   font-weight: 600;
   color: #fff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.note {
+  font-size: 11px;
+  color: #c3c3cd;
+  margin-top: 2px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;

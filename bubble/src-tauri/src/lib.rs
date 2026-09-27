@@ -1,11 +1,20 @@
+mod sessions;
+
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use serde::{Deserialize, Serialize};
+use sessions::{SessionState, Task, Tracker};
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Emitter, Manager};
+#[cfg(windows)]
+use windows::Win32::Graphics::Gdi::{
+    CombineRgn, CreateEllipticRgn, CreateRoundRectRgn, DeleteObject, SetWindowRgn, HGDIOBJ,
+    RGN_OR,
+};
 
 // Collapsed window width. Windows floors a captioned window to SM_CXMIN (~136px),
 // so we use 136 there and rely on the extra area being transparent + click-through
@@ -16,34 +25,92 @@ const COL_W: f64 = 136.0;
 #[cfg(not(windows))]
 const COL_W: f64 = 72.0;
 const COL_H: f64 = 72.0;
-const PANEL_W: f64 = 232.0;
+const BALL_SIZE: f64 = 54.0;
+const BALL_MARGIN: f64 = 9.0;
+const PANEL_W: f64 = 304.0;
 const PANEL_H: f64 = 320.0;
 
-#[derive(Clone, Serialize, Deserialize)]
-struct Task {
-    id: String,
-    project: String,
-    cwd: String,
-    session_id: String,
-    count: u32,
-    last_ts: i64,
+fn collapsed_region(scale: f64) -> (i32, i32, i32, i32) {
+    (
+        ((COL_W - BALL_MARGIN - BALL_SIZE) * scale).round() as i32,
+        0,
+        (COL_W * scale).round() as i32,
+        (COL_H * scale).round() as i32,
+    )
 }
 
-#[derive(Deserialize)]
-struct InboxEvent {
-    cwd: String,
-    #[serde(default)]
-    project: String,
-    #[serde(default)]
-    session_id: String,
-    #[serde(default)]
-    ts: i64,
+#[cfg(windows)]
+fn set_collapsed_region(
+    window: &tauri::WebviewWindow,
+    collapsed: bool,
+    show_badge: bool,
+) -> bool {
+    let Ok(hwnd) = window.hwnd() else {
+        return false;
+    };
+    unsafe {
+        if !collapsed {
+            return SetWindowRgn(hwnd, None, true) != 0;
+        }
+        let scale = window.scale_factor().unwrap_or(1.0);
+        let (left, _, right, _) = collapsed_region(scale);
+        let ball_top = (BALL_MARGIN * scale).round() as i32;
+        let ball_right = left + (BALL_SIZE * scale).round() as i32;
+        let ball_bottom = ball_top + (BALL_SIZE * scale).round() as i32;
+        let region = CreateEllipticRgn(left, ball_top, ball_right, ball_bottom);
+        if region.is_invalid() {
+            return false;
+        }
+        if show_badge {
+            let badge = CreateRoundRectRgn(
+                left + (27.0 * scale).round() as i32,
+                ball_top - (3.0 * scale).round() as i32,
+                right - (6.0 * scale).round() as i32,
+                ball_top + (16.0 * scale).round() as i32,
+                (19.0 * scale).round() as i32,
+                (19.0 * scale).round() as i32,
+            );
+            if badge.is_invalid() {
+                let _ = DeleteObject(HGDIOBJ(region.0));
+                return false;
+            }
+            if CombineRgn(Some(region), Some(region), Some(badge), RGN_OR).0 == 0 {
+                let _ = DeleteObject(HGDIOBJ(region.0));
+                let _ = DeleteObject(HGDIOBJ(badge.0));
+                return false;
+            }
+            let _ = DeleteObject(HGDIOBJ(badge.0));
+        }
+        if SetWindowRgn(hwnd, Some(region), true) == 0 {
+            let _ = DeleteObject(HGDIOBJ(region.0));
+            return false;
+        }
+    }
+    true
+}
+
+#[cfg(not(windows))]
+fn set_collapsed_region(
+    _window: &tauri::WebviewWindow,
+    _collapsed: bool,
+    _show_badge: bool,
+) -> bool {
+    true
 }
 
 #[derive(Default)]
 struct AppState {
     tasks: Mutex<Vec<Task>>,
     ball_pos: Mutex<Option<(i32, i32)>>,
+    // ponytail: set while we move the window ourselves, so WindowEvent::Moved
+    // can tell our own repositioning apart from a user drag.
+    moving_self: Mutex<bool>,
+    // ponytail: the panel->ball delta actually applied at expand time. Recomputing
+    // it is wrong because clamp_on_screen can shift the panel, making the
+    // transform non-invertible near screen edges. None until an expand sets it,
+    // so a panel-sized window we did not position cannot corrupt ball_pos.
+    panel_delta: Mutex<Option<(i32, i32)>>,
+    tracker: Mutex<Option<Tracker>>,
 }
 
 fn bubble_dir() -> PathBuf {
@@ -61,6 +128,21 @@ fn state_file() -> PathBuf {
 fn pos_file() -> PathBuf {
     bubble_dir().join("pos.json")
 }
+fn open_request_file() -> PathBuf {
+    bubble_dir().join("open.json")
+}
+fn claude_projects_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".claude")
+        .join("projects")
+}
+fn codex_sessions_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".codex")
+        .join("sessions")
+}
 
 fn load_pos() -> Option<(i32, i32)> {
     let s = fs::read_to_string(pos_file()).ok()?;
@@ -75,22 +157,30 @@ fn save_pos(x: i32, y: i32) {
     }
 }
 
-fn apply_visibility(window: &tauri::WebviewWindow, count: usize, ball_pos: Option<(i32, i32)>) {
-    if count > 0 {
-        let _ = window.show();
-        // macOS re-centers a hidden window on show, so re-apply the position after.
-        if let Some((x, y)) = ball_pos {
-            let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+fn move_self(window: &tauri::WebviewWindow, state: &AppState, x: i32, y: i32) {
+    *state.moving_self.lock().unwrap() = true;
+    let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+    *state.moving_self.lock().unwrap() = false;
+}
+
+fn show_ball(app: &tauri::AppHandle) {
+    if let Some(win) = app.get_webview_window("main") {
+        let bp = *app.state::<AppState>().ball_pos.lock().unwrap();
+        let _ = win.set_size(tauri::LogicalSize::new(COL_W, COL_H));
+        if let Some((x, y)) = bp {
+            move_self(&win, &app.state::<AppState>(), x, y);
         }
-    } else {
-        // Reset to the collapsed ball before hiding, so the next appearance is
-        // always a clean collapsed ball (never a stranded expanded panel).
-        let _ = window.set_size(tauri::LogicalSize::new(COL_W, COL_H));
-        if let Some((x, y)) = ball_pos {
-            let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
-        }
-        let _ = window.hide();
-        let _ = window.emit("collapsed", ());
+        let show_badge = app
+            .state::<AppState>()
+            .tasks
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|task| task.state == SessionState::Waiting);
+        let _ = set_collapsed_region(&win, true, show_badge);
+        let _ = win.show();
+        let _ = win.set_focus();
+        let _ = win.emit("collapsed", ());
     }
 }
 
@@ -115,59 +205,60 @@ fn save_state(tasks: &[Task]) {
     }
 }
 
-fn merge_event(tasks: &mut Vec<Task>, ev: InboxEvent) {
-    let project = if ev.project.is_empty() {
-        Path::new(&ev.cwd)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or(&ev.cwd)
-            .to_string()
-    } else {
-        ev.project
-    };
-    let ts = if ev.ts != 0 { ev.ts } else { now_ms() };
-    if let Some(t) = tasks.iter_mut().find(|t| t.cwd == ev.cwd) {
-        t.count += 1;
-        t.last_ts = ts;
-        t.session_id = ev.session_id;
-        t.project = project;
-    } else {
-        tasks.push(Task {
-            id: ev.cwd.clone(),
-            project,
-            cwd: ev.cwd,
-            session_id: ev.session_id,
-            count: 1,
-            last_ts: ts,
-        });
+fn poll(state: &AppState) -> (bool, bool, bool) {
+    let now = now_ms();
+    let scan = state
+        .tracker
+        .lock()
+        .unwrap()
+        .get_or_insert_with(|| Tracker::new(claude_projects_dir(), codex_sessions_dir()))
+        .scan(now);
+    let titles = vscode_titles();
+    let mut tasks = state.tasks.lock().unwrap();
+    let (changed, alert) = sessions::apply(&mut tasks, scan, &inbox_dir(), now, titles.as_deref());
+    if changed {
+        save_state(&tasks);
     }
+    let show_badge = tasks.iter().any(|task| task.state == SessionState::Waiting);
+    (changed, alert, show_badge)
 }
 
-fn ingest_inbox(tasks: &mut Vec<Task>) -> bool {
-    let dir = inbox_dir();
-    let _ = fs::create_dir_all(&dir);
-    let entries = match fs::read_dir(&dir) {
-        Ok(e) => e,
-        Err(_) => return false,
-    };
-    let mut changed = false;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("json") {
-            continue;
-        }
-        if let Ok(content) = fs::read_to_string(&path) {
-            if let Ok(ev) = serde_json::from_str::<InboxEvent>(&content) {
-                merge_event(tasks, ev);
-                changed = true;
+#[cfg(windows)]
+fn vscode_titles() -> Option<Vec<String>> {
+    type Hwnd = isize;
+    #[link(name = "user32")]
+    extern "system" {
+        fn EnumWindows(callback: extern "system" fn(Hwnd, isize) -> i32, param: isize) -> i32;
+        fn GetWindowTextW(hwnd: Hwnd, text: *mut u16, max: i32) -> i32;
+        fn IsWindowVisible(hwnd: Hwnd) -> i32;
+    }
+    extern "system" fn collect(hwnd: Hwnd, param: isize) -> i32 {
+        let titles = unsafe { &mut *(param as *mut Vec<String>) };
+        let mut buf = [0u16; 512];
+        let len = unsafe {
+            if IsWindowVisible(hwnd) == 0 {
+                return 1;
             }
+            GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32)
+        };
+        let title = String::from_utf16_lossy(&buf[..len.max(0) as usize]);
+        if title.ends_with(" - Visual Studio Code") {
+            titles.push(title);
         }
-        let _ = fs::remove_file(&path);
+        1
     }
-    changed
+    let mut titles: Vec<String> = Vec::new();
+    unsafe { EnumWindows(collect, &mut titles as *mut Vec<String> as isize) };
+    titles.sort();
+    Some(titles)
 }
 
-fn focus_or_open(project: &str, cwd: &str) {
+#[cfg(not(windows))]
+fn vscode_titles() -> Option<Vec<String>> {
+    None
+}
+
+fn focus_or_open(project: &str, cwd: &str, link: Option<String>) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -180,6 +271,7 @@ fn focus_or_open(project: &str, cwd: &str) {
             .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
             .arg(&path)
             .args(["-Project", project, "-Cwd", cwd])
+            .args(link.iter().flat_map(|l| ["-Link", l.as_str()]))
             .creation_flags(CREATE_NO_WINDOW)
             .spawn();
     }
@@ -188,22 +280,23 @@ fn focus_or_open(project: &str, cwd: &str) {
     // welcome. See README "Platform support".
     #[cfg(not(windows))]
     {
-        let _ = project;
+        let _ = (project, link);
         let _ = Command::new("code").arg(cwd).spawn();
     }
 }
 
-fn sorted(tasks: &[Task]) -> Vec<Task> {
-    let mut v = tasks.to_vec();
-    v.sort_by(|a, b| b.last_ts.cmp(&a.last_ts));
-    v
+fn request_companion_open(t: &Task) {
+    let tmp = bubble_dir().join("open.json.tmp");
+    let req = serde_json::json!({ "cwd": t.cwd, "session_id": t.id, "ts": now_ms() });
+    if fs::write(&tmp, req.to_string()).is_ok() {
+        let _ = fs::rename(&tmp, open_request_file());
+    }
 }
 
-fn remove_task(state: &tauri::State<AppState>, id: &str) -> Vec<Task> {
-    let mut tasks = state.tasks.lock().unwrap();
-    tasks.retain(|t| t.id != id);
-    save_state(&tasks);
-    sorted(&tasks)
+fn visible(tasks: &[Task]) -> Vec<Task> {
+    let mut v: Vec<Task> = tasks.iter().filter(|t| t.visible()).cloned().collect();
+    v.sort_by(|a, b| b.last_ts.cmp(&a.last_ts));
+    v
 }
 
 fn clamp_on_screen(window: &tauri::WebviewWindow, x: i32, y: i32, scale: f64) -> (i32, i32) {
@@ -236,60 +329,85 @@ fn startup_pos(window: &tauri::WebviewWindow) -> (i32, i32) {
     }
 }
 
-#[tauri::command]
-fn list_tasks(state: tauri::State<AppState>) -> Vec<Task> {
-    let tasks = state.tasks.lock().unwrap();
-    sorted(&tasks)
-}
-
-#[tauri::command]
-fn open_task(id: String, state: tauri::State<AppState>, window: tauri::WebviewWindow) -> Vec<Task> {
-    let target = {
-        let tasks = state.tasks.lock().unwrap();
-        tasks
-            .iter()
-            .find(|t| t.id == id)
-            .map(|t| (t.project.clone(), t.cwd.clone()))
-    };
-    if let Some((project, cwd)) = target {
-        focus_or_open(&project, &cwd);
-    }
-    let list = remove_task(&state, &id);
-    apply_visibility(&window, list.len(), *state.ball_pos.lock().unwrap());
-    list
-}
-
-#[tauri::command]
-fn dismiss_task(id: String, state: tauri::State<AppState>, window: tauri::WebviewWindow) -> Vec<Task> {
-    let list = remove_task(&state, &id);
-    apply_visibility(&window, list.len(), *state.ball_pos.lock().unwrap());
-    list
-}
-
-#[tauri::command]
-fn clear_all(state: tauri::State<AppState>, window: tauri::WebviewWindow) -> Vec<Task> {
-    {
-        let mut tasks = state.tasks.lock().unwrap();
-        tasks.clear();
-        save_state(&tasks);
-    }
-    apply_visibility(&window, 0, *state.ball_pos.lock().unwrap());
-    Vec::new()
-}
-
-#[tauri::command]
-fn expand_window(window: tauri::WebviewWindow, state: tauri::State<AppState>) -> bool {
-    let scale = window.scale_factor().unwrap_or(1.0);
-    let anchor = (*state.ball_pos.lock().unwrap())
-        .or_else(|| window.outer_position().ok().map(|p| (p.x, p.y)));
-    let open_up = match (anchor, window.primary_monitor()) {
+fn open_up_for(
+    window: &tauri::WebviewWindow,
+    anchor: Option<(i32, i32)>,
+    scale: f64,
+) -> bool {
+    match (anchor, window.primary_monitor()) {
         (Some((_, by)), Ok(Some(m))) => {
             let mid_y = m.position().y + (m.size().height as i32) / 2;
             (by + (COL_H * scale / 2.0) as i32) > mid_y
         }
         _ => false,
-    };
-    let _ = window.set_size(tauri::LogicalSize::new(PANEL_W, PANEL_H));
+    }
+}
+
+// Lets the webview lay the panel out in the still-collapsed window, so the resize
+// and the panel's first paint land in the same frame instead of two.
+#[tauri::command]
+fn peek_open_up(window: tauri::WebviewWindow, state: tauri::State<AppState>) -> bool {
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let anchor = *state.ball_pos.lock().unwrap();
+    open_up_for(&window, anchor, scale)
+}
+
+fn handled(t: &mut Task, now: i64) {
+    if t.state == SessionState::Waiting {
+        t.set(SessionState::Idle, now);
+    }
+}
+
+#[tauri::command]
+fn list_tasks(state: tauri::State<AppState>) -> Vec<Task> {
+    let tasks = state.tasks.lock().unwrap();
+    visible(&tasks)
+}
+
+#[tauri::command]
+fn open_task(id: String, state: tauri::State<AppState>) -> Vec<Task> {
+    let mut tasks = state.tasks.lock().unwrap();
+    if let Some(t) = tasks.iter_mut().find(|t| t.id == id) {
+        if t.opens_in_companion() {
+            request_companion_open(t);
+        }
+        focus_or_open(&t.project, &t.cwd, t.session_link());
+        handled(t, now_ms());
+    }
+    save_state(&tasks);
+    visible(&tasks)
+}
+
+#[tauri::command]
+fn dismiss_task(id: String, state: tauri::State<AppState>) -> Vec<Task> {
+    let mut tasks = state.tasks.lock().unwrap();
+    let now = now_ms();
+    if let Some(t) = tasks.iter_mut().find(|t| t.id == id) {
+        handled(t, now);
+        t.dismissed_at = now.max(t.last_ts);
+    }
+    save_state(&tasks);
+    visible(&tasks)
+}
+
+#[tauri::command]
+fn clear_all(state: tauri::State<AppState>) -> Vec<Task> {
+    let mut tasks = state.tasks.lock().unwrap();
+    let now = now_ms();
+    tasks.iter_mut().for_each(|t| handled(t, now));
+    save_state(&tasks);
+    visible(&tasks)
+}
+
+#[tauri::command]
+fn expand_window(window: tauri::WebviewWindow, state: tauri::State<AppState>) -> bool {
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let _ = set_collapsed_region(&window, false, false);
+    // ponytail: ball_pos is the only truth; never re-read outer_position here.
+    let anchor = *state.ball_pos.lock().unwrap();
+    let open_up = open_up_for(&window, anchor, scale);
+    // ponytail: move before resize. Resizing first paints one frame of the
+    // full-size panel at the ball's origin, which reads as a flash.
     if let Some((bx, by)) = anchor {
         let right = bx + (COL_W * scale) as i32;
         let new_x = right - (PANEL_W * scale) as i32;
@@ -299,19 +417,29 @@ fn expand_window(window: tauri::WebviewWindow, state: tauri::State<AppState>) ->
             by
         };
         let (nx, ny) = clamp_on_screen(&window, new_x, new_y, scale);
-        let _ = window.set_position(tauri::PhysicalPosition::new(nx, ny));
+        *state.panel_delta.lock().unwrap() = Some((bx - nx, by - ny));
+        move_self(&window, &state, nx, ny);
     }
+    let _ = window.set_size(tauri::LogicalSize::new(PANEL_W, PANEL_H));
     let _ = window.set_focus();
     open_up
 }
 
 #[tauri::command]
 fn collapse_window(window: tauri::WebviewWindow, state: tauri::State<AppState>) {
+    *state.panel_delta.lock().unwrap() = None;
     let anchor = *state.ball_pos.lock().unwrap();
-    let _ = window.set_size(tauri::LogicalSize::new(COL_W, COL_H));
     if let Some((bx, by)) = anchor {
-        let _ = window.set_position(tauri::PhysicalPosition::new(bx, by));
+        move_self(&window, &state, bx, by);
     }
+    let _ = window.set_size(tauri::LogicalSize::new(COL_W, COL_H));
+    let show_badge = state
+        .tasks
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|task| task.state == SessionState::Waiting);
+    let _ = set_collapsed_region(&window, true, show_badge);
 }
 
 #[tauri::command]
@@ -326,59 +454,64 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(AppState::default())
         .setup(|app| {
-            let count = {
-                let state = app.state::<AppState>();
-                let mut tasks = state.tasks.lock().unwrap();
+            let app_state = app.state::<AppState>();
+            let show_badge = {
+                let mut tasks = app_state.tasks.lock().unwrap();
                 *tasks = load_state();
-                ingest_inbox(&mut tasks);
-                save_state(&tasks);
-                tasks.len()
+                tasks.iter().any(|task| task.state == SessionState::Waiting)
             };
             if let Some(win) = app.get_webview_window("main") {
                 let _ = win.set_size(tauri::LogicalSize::new(COL_W, COL_H));
                 let start = load_pos().unwrap_or_else(|| startup_pos(&win));
-                let _ = win.set_position(tauri::PhysicalPosition::new(start.0, start.1));
+                move_self(&win, &app.state::<AppState>(), start.0, start.1);
                 *app.state::<AppState>().ball_pos.lock().unwrap() = Some(start);
-                apply_visibility(&win, count, Some(start));
+                let _ = set_collapsed_region(&win, true, show_badge);
+                let _ = win.show();
             }
             let handle = app.handle().clone();
             std::thread::spawn(move || {
-                let mut last_saved: Option<(i32, i32)> = None;
                 loop {
-                    std::thread::sleep(Duration::from_millis(1500));
-                    let state = handle.state::<AppState>();
-                    let (changed, count) = {
-                        let mut tasks = state.tasks.lock().unwrap();
-                        let c = ingest_inbox(&mut tasks);
-                        if c {
-                            save_state(&tasks);
-                        }
-                        (c, tasks.len())
-                    };
-                    if let Some(win) = handle.get_webview_window("main") {
-                        if changed {
-                            let bp = *state.ball_pos.lock().unwrap();
-                            apply_visibility(&win, count, bp);
-                            let _ = handle.emit("tasks-updated", ());
-                        }
-                        let scale = win.scale_factor().unwrap_or(1.0);
-                        if let (Ok(sz), Ok(pos)) = (win.inner_size(), win.outer_position()) {
-                            if (sz.width as f64) < 184.0 * scale {
-                                let cur = (pos.x, pos.y);
-                                let anchor = *state.ball_pos.lock().unwrap();
-                                let moved = anchor.map_or(true, |(bx, by)| {
-                                    (cur.0 - bx).abs() > 10 || (cur.1 - by).abs() > 10
-                                });
-                                if moved && last_saved != Some(cur) {
-                                    save_pos(cur.0, cur.1);
-                                    *state.ball_pos.lock().unwrap() = Some(cur);
-                                    last_saved = Some(cur);
-                                }
+                    let (changed, alert, show_badge) = poll(&handle.state::<AppState>());
+                    if changed {
+                        if let Some(win) = handle.get_webview_window("main") {
+                            let scale = win.scale_factor().unwrap_or(1.0);
+                            let collapsed = win
+                                .inner_size()
+                                .map(|size| size.width as f64 <= (COL_W + 1.0) * scale)
+                                .unwrap_or(false);
+                            if collapsed {
+                                let _ = set_collapsed_region(&win, true, show_badge);
                             }
+                            let _ = win.emit("tasks-updated", alert);
                         }
                     }
+                    std::thread::sleep(Duration::from_millis(1500));
                 }
             });
+            let show_i = MenuItem::with_id(app, "show", "显示气泡球", true, None::<&str>)?;
+            let quit_i = MenuItem::with_id(app, "quit", "退出 bubble", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show_i, &quit_i])?;
+            TrayIconBuilder::new()
+                .icon(app.default_window_icon().unwrap().clone())
+                .tooltip("bubble")
+                .menu(&menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "show" => show_ball(app),
+                    "quit" => app.exit(0),
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        show_ball(tray.app_handle());
+                    }
+                })
+                .build(app)?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -386,10 +519,49 @@ pub fn run() {
             open_task,
             dismiss_task,
             clear_all,
+            peek_open_up,
             expand_window,
             collapse_window,
             quit_app
         ])
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::Moved(pos) = event {
+                let state = window.state::<AppState>();
+                if *state.moving_self.lock().unwrap() {
+                    return;
+                }
+                let scale = window.scale_factor().unwrap_or(1.0);
+                let expanded = window
+                    .inner_size()
+                    .map(|sz| (sz.width as f64) >= (COL_W + 24.0) * scale)
+                    .unwrap_or(false);
+                // Dragging the expanded panel must still move the ball: reuse the
+                // exact delta expand_window applied, clamp included. Without a
+                // recorded delta this move is not ours to interpret -- ignore it
+                // rather than write a panel corner into ball_pos.
+                let (bx, by) = if expanded {
+                    match *state.panel_delta.lock().unwrap() {
+                        Some((dx, dy)) => (pos.x + dx, pos.y + dy),
+                        None => return,
+                    }
+                } else {
+                    (pos.x, pos.y)
+                };
+                save_pos(bx, by);
+                *state.ball_pos.lock().unwrap() = Some((bx, by));
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod window_region_tests {
+    use super::collapsed_region;
+
+    #[test]
+    fn collapsed_region_starts_at_the_visible_ball() {
+        assert_eq!(collapsed_region(1.0), (73, 0, 136, 72));
+        assert_eq!(collapsed_region(1.5), (110, 0, 204, 108));
+    }
 }

@@ -1,0 +1,21 @@
+{
+  "name": "bubble-companion",
+  "displayName": "bubble companion",
+  "description": "Tells the bubble desktop ball which Claude / Codex session tab you are looking at, and opens a session tab when you click its row.",
+  "version": "0.0.1",
+  "publisher": "bubble",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./extension.js",
+  "files": [
+    "extension.js"
+  ],
+  "scripts": {
+    "install-local": "npx --yes @vscode/vsce package --allow-missing-repository --skip-license -o bubble-companion.vsix && code --install-extension bubble-companion.vsix --force"
+  }
+}

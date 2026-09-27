@@ -16,14 +16,26 @@ try {
 
 try {
   let cwd = process.cwd();
+  let thread = "";
   const payload = passthrough[passthrough.length - 1];
   if (payload) {
     try {
       const d = JSON.parse(payload);
       if (d && typeof d.cwd === "string") cwd = d.cwd;
+      if (d && typeof d["thread-id"] === "string") thread = d["thread-id"];
     } catch {}
   }
-  const rec = { cwd, project: path.basename(cwd), session_id: "codex", ts: Date.now() };
+  // Codex has no separate permission event, so turn-ended is its only "waiting
+  // for you" signal and stays a counted notify.
+  const rec = {
+    cwd,
+    project: path.basename(cwd),
+    session_id: thread,
+    ts: Date.now(),
+    kind: "notify",
+    agent: "codex",
+    note: "",
+  };
   const dir = path.join(os.homedir(), ".claude", "bubble", "inbox");
   fs.mkdirSync(dir, { recursive: true });
   const name = rec.ts + "-" + Math.random().toString(36).slice(2, 10) + ".json";
